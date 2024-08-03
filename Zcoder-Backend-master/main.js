@@ -2,13 +2,23 @@ const express = require("express");
 const main = express();
 const multer = require("multer");
 const session = require('cookie-session');
-
+const bodyParser = require("body-parser");
+const http = require('http');
+const socketIo = require('socket.io');
+const bcrypt = require('bcryptjs');
+const server = http.createServer(main);
+const io = socketIo(server, {
+  cors: {
+    origin: 'https://zcoderstage.vercel.app',
+    methods: ['GET', 'POST']
+  }
+});
 
 const cors = require('cors');
 main.use(cors({
-
   origin: 'https://zcoderstage.vercel.app',
-  methods: ['GET', 'POST']
+  methods: ['GET', 'POST'],
+  credentials: true
 }));
 
 main.use(session({
@@ -16,9 +26,62 @@ main.use(session({
   resave: false,
   saveUninitialized: true
 }));
-
+const onlineUsers = {};
 const User = require("./user");
 const Question = require("./questionschema");
+const Messages = require("./messageModel");
+const Comment = require("./comment");
+
+main.use(bodyParser.json());
+
+// POST endpoint to send a message
+main.post("/friends", async (req, res) => {
+  const { senderEmail, receiverEmail, messageText } = req.body;
+
+  try {
+    const sender = await User.findOne({ email: senderEmail });
+    const receiver = await User.findOne({ email: receiverEmail });
+
+    if (!sender || !receiver) {
+      return res.status(404).json({ message: "Sender or receiver not found" });
+    }
+
+    const message = new Messages({
+      message: { text: messageText },
+      users: [sender._id, receiver._id],
+      sender: sender._id,
+    });
+
+    await message.save();
+
+    res.status(201).json(message);
+  } catch (error) {
+    console.error("Send Message Error:", error);
+    res.status(500).json({ message: "Failed to send message" });
+  }
+});
+
+main.get("/friends", async (req, res) => {
+  const { from, to } = req.query;
+
+  try {
+    const sender = await User.findOne({ email: from });
+    const receiver = await User.findOne({ email: to });
+
+    if (!sender || !receiver) {
+      return res.status(404).json({ message: "Sender or receiver not found" });
+    }
+
+    const messages = await Messages.find({
+      users: { $all: [sender._id, receiver._id] },
+    }).sort({ createdAt: 1 });
+
+    res.status(200).json(messages);
+  } catch (error) {
+    console.error("Fetch Chat Error:", error);
+    res.status(500).json({ message: "Failed to fetch chat messages" });
+  }
+});
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -36,16 +99,82 @@ main.set("view engine", "ejs");
 main.use(express.urlencoded({ extended: false }));
 main.use(express.static("./views"));
 
-main.listen(3000, () => {
-  console.log("port connected");
+
+
+
+
+    io.on('connection', (socket) => {
+      console.log('a user connected');
+    
+      socket.on('setUserId', (userId) => {
+        onlineUsers[userId] = socket.id;
+        io.emit('userOnline', onlineUsers);
+    
+      
+        
+        });
+        socket.on('sendMessage', async (messageData) => {
+          const { senderEmail, receiverEmail, messageText } = messageData;
+      
+          try {
+            const sender = await User.findOne({ email: senderEmail });
+            const receiver = await User.findOne({ email: receiverEmail });
+      
+            if (!sender || !receiver) {
+              return;
+            }
+      
+            const message = new Messages({
+              message: { text: messageText },
+              users: [sender._id, receiver._id],
+              sender: sender._id,
+            });
+      
+            await message.save();
+      
+            io.emit('receiveMessage', {
+              message: { text: messageText },
+              users: [sender._id, receiver._id],
+              sender: sender._id,
+              receiver: receiver._id,
+              senderhandle:sender.userhandle,
+            });
+      
+          } catch (error) {
+            console.error("Send Message Error:", error);
+          }
+        });
+      
+        socket.on('typing', ({ from, to, typing }) => {
+          if (onlineUsers[to]) {
+            io.to(onlineUsers[to]).emit('typing', { from, typing });
+          }
+        });
+      
+        socket.on('disconnect', () => {
+            const userId = Object.keys(onlineUsers).find((key) => onlineUsers[key] === socket.id);
+          if (userId) {
+            delete onlineUsers[userId];
+            io.emit('userOnline', onlineUsers);
+          }
+          console.log('User disconnected:', socket.id);
+        });
+      });
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
+
+
 
 main.get("/", async (req, res) => {
   const id = "5a9427648b0beebeb69579e7";
   const user = await User.findById(id);
   const questions = await Question.find();
+  const comments = await Comment.find().populate('userId', 'userhandle');
   console.log(user);
-  res.render("landing", { user, questions });
+  res.render("landing", { user, questions , comments});
 });
 main.post("/questions", async (req, res) => {
   const userEmail = req.query.email;
@@ -88,6 +217,8 @@ main.post("/register", upload.single("profile_image"), async (req, res) => {
      
     }
 
+
+    const hashedPassword = await bcrypt.hash(req.body.password, 10);
    
 
     const user = new User({
@@ -98,9 +229,16 @@ main.post("/register", upload.single("profile_image"), async (req, res) => {
       email: req.body.email,
      userhandle: req.body.userhandle.toLowerCase(),
       profile_image: req.body.profile_image,
-      password: req.body.password,
+      password: hashedPassword,
       bookmark: [],
       following: [],
+      handles: {
+        "Codeforces": "https://codeforces.com/",
+        "Codechef": "https://codechef.com/",
+        "Atcoder": "https://atcoder.jp/",
+        "GeeksforGeeks": "https://www.geeksforgeeks.org/courses?source=google&medium=cpc&device=c&keyword=geeksforgeeks&matchtype=e&campaignid=20039445781&adgroup=147845288105&gad_source=1&gclid=Cj0KCQjwvb-zBhCmARIsAAfUI2v1KJMpGxPciw1K_nrOvdH4tBuCxdVuQQbIfXOMF4x508G9i4w9k6gaAq0uEALw_wcB",
+        "Leetcode": "https://leetcode.com/"
+      }
     
     });
      console.log(user);
@@ -140,7 +278,8 @@ main.post("/register", upload.single("profile_image"), async (req, res) => {
 main.post("/signin", async (req, res) => {
   try {
     const user = await User.findOne({ email: req.body.email });
-    if (user.password === req.body.password) {
+    const isMatch = await bcrypt.compare(req.body.password, user.password);
+    if (isMatch) {
       const questions = await Question.find();
       if (req.session.questionToBookmark) {
         user.bookmark.push(req.session.questionToBookmark);
@@ -153,7 +292,8 @@ main.post("/signin", async (req, res) => {
         });
         req.session.bookmark = null;
        // return res.render("bookmarkquestions", { user, bookmarkedQuestions });
-       return res.json({ user, bookmarkedQuestions });
+       const comments = await Comment.find().populate('userId', 'userhandle');
+       return res.json({ user, bookmarkedQuestions ,comments });
       }
 
       console.log(user);
@@ -254,7 +394,8 @@ main.get("/question", async (req, res) => {
   const userEmail = req.query.email;
   const user = await User.findOne({ email: userEmail });
   const questions = await Question.find();
-  return res.json({ user, questions });
+  const comments = await Comment.find().populate('userId', 'userhandle');
+  return res.json({ user, questions,comments });
 });
 
 main.get('/profile', async (req, res) => {
@@ -297,6 +438,8 @@ main.post("/update", async (req, res) => {
           email: req.body.email,
           userhandle: req.body.userhandle,
           password: req.body.password, 
+          about: req.body.about,
+      skills: Array.isArray(req.body.skills) ? req.body.skills : [req.body.skills]
     };
     console.log(updatedUserData);
 
@@ -413,4 +556,28 @@ main.post('/follow/:userId', async (req, res) => {
 
 
 
+main.post("/comment/:questionId/:userId", async (req, res) => {
+  const { questionId, userId } = req.params;
+  const { comment } = req.body;
+  // console.log('Question ID:', questionId);
+  // console.log('User ID:', userId);
+  // console.log('Comment:', comment);
 
+  try {
+    const newComment = new Comment({
+      questionId,
+      userId,
+      comment,
+    });
+
+    const user = await User.findById(userId);
+    await newComment.save();
+
+    const questions = await Question.find();
+    const comments = await Comment.find().populate('userId', 'userhandle');
+   
+    return res.json({ user, questions, comments });
+  } catch (error) {
+    res.status(500).send("Internal Server Error");
+  }
+});
